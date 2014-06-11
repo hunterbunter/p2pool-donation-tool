@@ -1,6 +1,7 @@
+#!/usr/bin/env python
 # check_donations.py
 # runs once per minute, looking for unpaid donations that now have 3 confirmations, then acting on it.
-#!/usr/bin/env python
+
 import json, urllib2, sys, web, smtplib, datetime, logging, traceback
 from bitcoinrpc.authproxy import AuthServiceProxy
 from decimal import *
