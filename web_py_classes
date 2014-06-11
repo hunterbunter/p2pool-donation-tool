@@ -1,0 +1,161 @@
+# web.py classes and helper functions
+
+# Miscellaneous commands to setup rpc access to bitcoin wallet and db
+db = web.database(dbn='postgres', db='dbname', user='username, pw='userpw')
+config_location = '<path to file>'
+with open(config_location, 'r') as f:
+        config = json.load(f)
+coins = {}
+for coin, settings in config.iteritems():
+        coins[coin] = {'access': AuthServiceProxy("http://%s:%s@%s:%s/" % (settings['rpcuser'], settings['rpcpass'], settings['rpcserver'], settings['rpcport']))}
+rpc = coins['bitcoin']['access']
+# can now access bitcoin wallet via rpc.command()
+
+def validate_donation_id(id):
+        """ Take in a donation id, check its length, that it's a hex, and that it exists in the db """
+        # first validate the donation_id: should be 32 chars, all hex digits
+        if len(id) != 32:
+                return False
+        try:
+                int(id, 16)
+        except ValueError:
+                return False
+        # search db for donation id, get details and send it back with status template
+        try:
+                q = db.query("select * from donations where special_id = $id", vars={'id':id})[0]
+        except IndexError:
+                return False
+        return True
+
+
+def get_donation_data(id):
+        """ take a donation id (hash), retrieve it from the db, then add a few basic variables.
+                Work out if this donation has been confirmed or not here, then supply that data to the return dictionary """
+        q = db.query("select * from donations where special_id = $id", vars={'id':id})[0]
+        # check balance on address
+        balance = rpc.getreceivedbyaddress(q.btc_addr)
+        q['balance'] = '%.8f' % balance
+        q['expected'] = '%.8f' % (q.amount + q.tip)
+        q['expected_mbtc'] = '%.5f' % (1000*(q.amount + q.tip))
+        q['expected_ubtc'] = '%.2f' % (1000000*(q.amount + q.tip))
+        q['donation_url'] = "http://blisterpool.com/getdonationstatus/"+id
+        q['modtime'] = ""
+        # get confirmations
+        q['confirmations'] = "0 of 3 confirmations"
+        results = rpc.listreceivedbyaddress()
+        for row in results:
+                if q.btc_addr == row['address']:
+                        if row['confirmations'] > 3:
+                                q['confirmations'] = "confirmed (%d confirmations)" % row['confirmations']
+                        else:
+                                q['confirmations'] = "%d of 3 confirmations" % row['confirmations']
+        return q
+
+
+def get_paid_donations():
+        """ Simple function just to retrieve the most recent donations and their details from db """
+        # data I need:
+        # return a list of dictionaries
+        # each dictionary = {donation, details}
+        # donation = {time (date monthword year), total_donated, number_of_miners_paid}
+        # return string to represent donation: date h:m:s: total_donated sent to number_of_miners_paid
+        # details = results from payouts table
+        results = []
+        try:
+                q = db.query("select * from donations where status='paid' order by modtime desc limit 10")
+                for donation in q:
+                        r = db.query("select * from payouts_"+str(donation.special_id))
+                        this_donation = {}
+                        this_donation['header'] = "%s: %.4f btc sent to %d miners" % (donation.modtime.strftime("%d %b %Y %H:%M"), float(donation.amount), len(r))
+                        this_donation['body'] = [x for x in r]
+                        this_donation['footer'] = donation.btc_addr
+                        this_donation['special_id'] = donation.special_id
+                        results.append(this_donation)
+        except:
+                raise
+        return results
+
+def get_payment_data(id):
+	""" return all payments from a particular donation hash id """
+        q = db.query("select * from payouts_"+str(id))
+        return q
+
+def gimme_hashsig():
+        """ Simple hash function that returns a 32 hex number, for id purposes """
+        hash = hashlib.sha1()
+        hash.update(str(time.time()))
+        return hash.hexdigest()[:32]
+
+class p2pdonate:
+        def GET(self):
+                paid_donations = get_paid_donations()
+                defaults = {'refund':'Optional Bitcoin Refund Address', 'amount':0.1, 'cutoff':0.0001, 'tip':0.01, 'email':'Optional E-mail', 'paid_donations':paid_donations}
+                return compile(subrender.p2pdonate(None, defaults))
+        def POST(self):
+                refund, amount, cutoff, email, tip = str(web.input().refund), str(web.input().amount), str(web.input().cutoff), str(web.input().email), str(web.input().tip)
+                defaults = {'refund':refund, 'amount':amount, 'cutoff':cutoff, 'tip':tip, 'email':email}
+                # validate everything
+                if 'Optional Bitcoin Refund Address' != refund:
+                        if not validate.validate(refund):
+                                return compile(subrender.p2pdonate("REFUND_INVALID", defaults))
+                else:
+                        refund = "None"
+                if 'Optional E-mail' != email:
+                        is_valid = validate_email(email, verify=True)
+                        if not is_valid:
+                                return compile(subrender.p2pdonate("EMAIL_INVALID", defaults))
+                else:
+                        email = "None"
+                try:
+                        amount = float(amount)
+                        if amount < 0.01: raise ValueError
+                except ValueError:
+                        return compile(subrender.p2pdonate("AMOUNT_INVALID", defaults))
+                try:
+                        cutoff = float(cutoff)
+                        if amount < 0.00001: raise ValueError
+                except ValueError:
+                        return compile(subrender.p2pdonate("CUTOFF_INVALID", defaults))
+                try:
+                        tip = float(tip)
+                        if tip < 0.0: raise ValueError
+                except ValueError:
+                        return compile(subrender.p2pdonate("TIP_INVALID", defaults))
+                # get a hash to identify this donation
+                hash = gimme_hashsig()
+                # get a donation address and set status
+                donation_addr = str(rpc.getnewaddress('donations'))
+                status = "unpaid"
+                # store in database as expected transaction
+                t = db.transaction()
+                try:
+                        db.query("insert into donations (btc_addr, return_addr, amount, cutoff, status, tip, email, special_id) values ($btc_addr, $refund, $amount, $cutoff, $status, $tip, $email, $special)", vars={'btc_addr':donation_addr, 'refund':refund, 'tip':tip, 'amount':amount, 'cutoff': cutoff, 'status':status, 'email':email, 'special': hash})
+                        t.commit()
+                except:
+                        raise
+                # create payment url
+                url = "http://blisterpool.com/p2pdonationstatus/%s" % hash
+                # send email to donator
+                defaults = {'url':url, 'refund':refund, 'amount':amount, 'cutoff':cutoff, 'tip':tip, 'email':email, 'special_id':hash, 'donation_addr':donation_addr}
+                if email != "None":
+                        SendDonationEmail(defaults)
+                defaults['email'] = "p2pool@blisteringdevelopers.com"
+                SendDonationEmail(defaults)
+                raise web.seeother(url)
+
+class p2pdonationstatus:
+        def GET(self, donation_id):
+                is_valid = validate_donation_id(donation_id)
+                if is_valid != True:
+                        return compile(subrender.p2pdonationstatus("HASH_INVALID", None))
+
+                q = get_donation_data(donation_id)
+                q['email'] = re.sub(r'.*@', '***@', q['email'])
+                if q['status'] == "paid":
+                        # get payment data to send
+                        q['payments'] = get_payment_data(donation_id)
+                        return compile(subrender.p2pdonationstatus("PAID", q))
+                else:
+                        q['payments'] = None
+                        return compile(subrender.p2pdonationstatus("UNPAID", q))
+
