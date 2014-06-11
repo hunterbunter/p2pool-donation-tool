@@ -1,7 +1,7 @@
 p2pool-donation-tool
 ====================
 
-This repository contains the workhorse files for http://blisterpool/p2pdonate. It uses a web.py template engine to serve pages, and the pages are served based on the two classes p2pdonate and p2pdonationstatus.
+This repository contains the workhorse files for http://blisterpool.com/p2pdonate. It uses a web.py template engine to serve pages, and the pages are served based on the two classes p2pdonate and p2pdonationstatus.
 
 The other functions are helper functions called by the above classes.
 
