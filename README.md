@@ -5,4 +5,4 @@ This repository contains the workhorse files for http://blisterpool.com/p2pdonat
 
 The other functions are helper functions called by the above classes.
 
-The main script (check_donations.py) connects to the bitcoin wallet, p2pool node and db to check which donations have been filled (3 confirmations), after which it fills out more db, sends payment out and an email to the donater (if one has been given), as well as an email to the administrator with any errors.
+The main script (check_donations.py) connects to the bitcoin wallet, p2pool node and db to check which donations have been filled (3 confirmations), after which it fills out more db, sends payment out and an email to the donater (if one has been given), as well as an email to the administrator with any errors. It's setup as a cronjob once per minute.
